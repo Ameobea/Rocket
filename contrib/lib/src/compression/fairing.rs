@@ -1,26 +1,16 @@
-use rocket::config::{ConfigError, Value};
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::MediaType;
-use rocket::Rocket;
 use rocket::{Request, Response};
 
-struct Context {
-    exclusions: Vec<MediaType>,
-}
-
-impl Default for Context {
-    fn default() -> Context {
-        Context {
-            exclusions: vec![
-                MediaType::parse_flexible("application/gzip").unwrap(),
-                MediaType::parse_flexible("application/zip").unwrap(),
-                MediaType::parse_flexible("image/*").unwrap(),
-                MediaType::parse_flexible("video/*").unwrap(),
-                MediaType::parse_flexible("application/wasm").unwrap(),
-                MediaType::parse_flexible("application/octet-stream").unwrap(),
-            ],
-        }
-    }
+lazy_static! {
+    static ref EXCLUSIONS: Vec<MediaType> = vec![
+        MediaType::parse_flexible("application/gzip").unwrap(),
+        MediaType::parse_flexible("application/zip").unwrap(),
+        MediaType::parse_flexible("image/*").unwrap(),
+        MediaType::parse_flexible("video/*").unwrap(),
+        MediaType::parse_flexible("application/wasm").unwrap(),
+        MediaType::parse_flexible("application/octet-stream").unwrap(),
+    ];
 }
 
 /// Compresses all responses with Brotli or Gzip compression.
@@ -95,6 +85,7 @@ impl Compression {
     }
 }
 
+#[async_trait]
 impl Fairing for Compression {
     fn info(&self) -> Info {
         Info {
@@ -103,52 +94,7 @@ impl Fairing for Compression {
         }
     }
 
-    fn on_attach(&self, rocket: Rocket) -> Result<Rocket, Rocket> {
-        let mut ctxt = Context::default();
-
-        match rocket.config().get_table("compress").and_then(|t| {
-            t.get("exclude").ok_or_else(|| ConfigError::Missing(String::from("exclude")))
-        }) {
-            Ok(excls) => match excls.as_array() {
-                Some(excls) => {
-                    ctxt.exclusions = excls.iter().flat_map(|ex| {
-                        if let Value::String(s) = ex {
-                            let mt = MediaType::parse_flexible(s);
-                            if mt.is_none() {
-                                warn_!("Ignoring invalid media type '{:?}'", s);
-                            }
-                            mt
-                        } else {
-                            warn_!("Ignoring non-string media type '{:?}'", ex);
-                            None
-                        }
-                    }).collect();
-                }
-                None => {
-                    warn_!(
-                        "Exclusions is not an array; using default compression exclusions '{:?}'",
-                        ctxt.exclusions
-                    );
-                }
-            },
-            Err(ConfigError::Missing(_)) => { /* ignore missing */ }
-            Err(e) => {
-                e.pretty_print();
-                warn_!(
-                    "Using default compression exclusions '{:?}'",
-                    ctxt.exclusions
-                );
-            }
-        };
-
-        Ok(rocket.manage(ctxt))
-    }
-
-    fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
-        let context = request
-            .guard::<rocket::State<'_, Context>>()
-            .expect("Compression Context registered in on_attach");
-
-        super::CompressionUtils::compress_response(request, response, &context.exclusions);
+    async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
+        super::CompressionUtils::compress_response(request, response, &EXCLUSIONS);
     }
 }

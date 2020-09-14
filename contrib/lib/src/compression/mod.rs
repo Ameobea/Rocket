@@ -30,8 +30,10 @@ pub use self::responder::Compress;
 
 use std::io::Read;
 
+use futures::future::FutureExt;
+use futures::StreamExt;
+use rocket::http::hyper::header::CONTENT_ENCODING;
 use rocket::http::MediaType;
-use rocket::http::hyper::header::{ContentEncoding, Encoding};
 use rocket::{Request, Response};
 
 #[cfg(feature = "brotli_compression")]
@@ -39,6 +41,57 @@ use brotli::enc::backward_references::BrotliEncoderMode;
 
 #[cfg(feature = "gzip_compression")]
 use flate2::read::GzEncoder;
+
+pub enum Encoding {
+    /// The `chunked` encoding.
+    Chunked,
+    /// The `br` encoding.
+    Brotli,
+    /// The `gzip` encoding.
+    Gzip,
+    /// The `deflate` encoding.
+    Deflate,
+    /// The `compress` encoding.
+    Compress,
+    /// The `identity` encoding.
+    Identity,
+    /// The `trailers` encoding.
+    Trailers,
+    /// Some other encoding that is less common, can be any String.
+    EncodingExt(String),
+}
+
+impl std::fmt::Display for Encoding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match *self {
+            Encoding::Chunked => "chunked",
+            Encoding::Brotli => "br",
+            Encoding::Gzip => "gzip",
+            Encoding::Deflate => "deflate",
+            Encoding::Compress => "compress",
+            Encoding::Identity => "identity",
+            Encoding::Trailers => "trailers",
+            Encoding::EncodingExt(ref s) => s.as_ref(),
+        })
+    }
+}
+
+impl std::str::FromStr for Encoding {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Encoding, std::convert::Infallible> {
+        match s {
+            "chunked" => Ok(Encoding::Chunked),
+            "br" => Ok(Encoding::Brotli),
+            "deflate" => Ok(Encoding::Deflate),
+            "gzip" => Ok(Encoding::Gzip),
+            "compress" => Ok(Encoding::Compress),
+            "identity" => Ok(Encoding::Identity),
+            "trailers" => Ok(Encoding::Trailers),
+            _ => Ok(Encoding::EncodingExt(s.to_owned())),
+        }
+    }
+}
 
 struct CompressionUtils;
 
@@ -56,12 +109,15 @@ impl CompressionUtils {
         response.headers().get("Content-Encoding").next().is_some()
     }
 
-    fn set_body_and_encoding<'r, B: Read + 'r>(
+    fn set_body_and_encoding<'r, B: rocket::tokio::io::AsyncRead + Send + 'r>(
         response: &mut Response<'r>,
         body: B,
         encoding: Encoding,
     ) {
-        response.set_header(ContentEncoding(vec![encoding]));
+        response.set_header(::rocket::http::Header::new(
+            CONTENT_ENCODING.as_str(),
+            format!("{}", encoding),
+        ));
         response.set_streamed_body(body);
     }
 
@@ -81,7 +137,11 @@ impl CompressionUtils {
         }
     }
 
-    fn compress_response(request: &Request<'_>, response: &mut Response<'_>, exclusions: &[MediaType]) {
+    fn compress_response(
+        request: &Request<'_>,
+        response: &mut Response<'_>,
+        exclusions: &[MediaType],
+    ) {
         if CompressionUtils::already_encoded(response) {
             return;
         }
@@ -94,7 +154,7 @@ impl CompressionUtils {
 
         // Compression is done when the request accepts brotli or gzip encoding
         // and the corresponding feature is enabled
-        if cfg!(feature = "brotli_compression") && CompressionUtils::accepts_encoding(request, "br")
+        /*if cfg!(feature = "brotli_compression") && CompressionUtils::accepts_encoding(request, "br")
         {
             #[cfg(feature = "brotli_compression")]
             {
@@ -118,15 +178,33 @@ impl CompressionUtils {
                     );
                 }
             }
-        } else if cfg!(feature = "gzip_compression")
-            && CompressionUtils::accepts_encoding(request, "gzip")
+        } else */
+        if cfg!(feature = "gzip_compression") && CompressionUtils::accepts_encoding(request, "gzip")
         {
             #[cfg(feature = "gzip_compression")]
             {
                 if let Some(plain) = response.take_body() {
-                    let compressor = GzEncoder::new(plain.into_inner(), flate2::Compression::default());
+                    let body = async {
+                        let body = plain.into_bytes().await.unwrap_or_else(Vec::new);
+                        let mut compressor =
+                            GzEncoder::new(body.as_slice(), flate2::Compression::default());
+                        let mut buf = Vec::new();
+                        match compressor.read_to_end(&mut buf) {
+                            Ok(_) => (),
+                            Err(err) => {
+                                error!("Error compressing response with gzip: {:?}", err);
+                                return futures::stream::iter(vec![Err(err)]);
+                            }
+                        }
 
-                    CompressionUtils::set_body_and_encoding(response, compressor, Encoding::Gzip);
+                        futures::stream::iter(vec![Ok(std::io::Cursor::new(buf))])
+                    }
+                    .into_stream()
+                    .flatten();
+
+                    let body = tokio::io::stream_reader(body);
+
+                    CompressionUtils::set_body_and_encoding(response, body, Encoding::Gzip);
                 }
             }
         }

@@ -1,11 +1,11 @@
-use std::{io, fmt, str};
 use std::borrow::Cow;
 use std::pin::Pin;
+use std::{fmt, io, str};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
+use crate::http::{ContentType, Cookie, Header, HeaderMap, Status};
 use crate::response::{self, Responder};
-use crate::http::{Header, HeaderMap, Status, ContentType, Cookie};
 
 /// The default size, in bytes, of a chunk for streamed responses.
 pub const DEFAULT_CHUNK_SIZE: usize = 4096;
@@ -15,7 +15,7 @@ pub enum Body<A, B> {
     /// A fixed-size body.
     Sized(A, Option<usize>),
     /// A streamed/chunked body, akin to `Transfer-Encoding: chunked`.
-    Chunked(B, usize)
+    Chunked(B, usize),
 }
 
 impl<A, B> Body<A, B> {
@@ -23,7 +23,7 @@ impl<A, B> Body<A, B> {
     pub fn as_mut(&mut self) -> Body<&mut A, &mut B> {
         match *self {
             Body::Sized(ref mut a, n) => Body::Sized(a, n),
-            Body::Chunked(ref mut b, n) => Body::Chunked(b, n)
+            Body::Chunked(ref mut b, n) => Body::Chunked(b, n),
         }
     }
 
@@ -34,7 +34,7 @@ impl<A, B> Body<A, B> {
     pub fn map<U, F1: FnOnce(A) -> U, F2: FnOnce(B) -> U>(self, f1: F1, f2: F2) -> Body<U, U> {
         match self {
             Body::Sized(a, n) => Body::Sized(f1(a), n),
-            Body::Chunked(b, n) => Body::Chunked(f2(b), n)
+            Body::Chunked(b, n) => Body::Chunked(f2(b), n),
         }
     }
 
@@ -59,19 +59,20 @@ impl<T> Body<T, T> {
     /// Consumes `self` and returns the inner body.
     pub fn into_inner(self) -> T {
         match self {
-            Body::Sized(b, _) | Body::Chunked(b, _) => b
+            Body::Sized(b, _) | Body::Chunked(b, _) => b,
         }
     }
 }
 
 impl<A, B> Body<A, B>
-    where A: AsyncRead + AsyncSeek + Send + Unpin,
-          B: AsyncRead + Send + Unpin
+where
+    A: AsyncRead + AsyncSeek + Send + Unpin,
+    B: AsyncRead + Send + Unpin,
 {
     pub fn known_size(&self) -> Option<usize> {
         match self {
             Body::Sized(_, Some(known)) => Some(*known),
-            _ => None
+            _ => None,
         }
     }
 
@@ -82,12 +83,15 @@ impl<A, B> Body<A, B>
         if let Body::Sized(body, size) = self {
             match *size {
                 Some(size) => Some(size),
-                None => async {
-                    let pos = body.seek(io::SeekFrom::Current(0)).await.ok()?;
-                    let end = body.seek(io::SeekFrom::End(0)).await.ok()?;
-                    body.seek(io::SeekFrom::Start(pos)).await.ok()?;
-                    Some(end as usize - pos as usize)
-                }.await
+                None => {
+                    async {
+                        let pos = body.seek(io::SeekFrom::Current(0)).await.ok()?;
+                        let end = body.seek(io::SeekFrom::End(0)).await.ok()?;
+                        body.seek(io::SeekFrom::Start(pos)).await.ok()?;
+                        Some(end as usize - pos as usize)
+                    }
+                    .await
+                }
             }
         } else {
             None
@@ -98,7 +102,9 @@ impl<A, B> Body<A, B>
     /// Send + Unpin)`.
     pub fn as_reader(&mut self) -> &mut (dyn AsyncRead + Send + Unpin) {
         type Reader<'a> = &'a mut (dyn AsyncRead + Send + Unpin);
-        self.as_mut().map(|a| a as Reader<'_>, |b| b as Reader<'_>).into_inner()
+        self.as_mut()
+            .map(|a| a as Reader<'_>, |b| b as Reader<'_>)
+            .into_inner()
     }
 
     /// Attempts to read `self` into a `Vec` and returns it. If reading fails,
@@ -116,13 +122,15 @@ impl<A, B> Body<A, B>
     /// Attempts to read `self` into a `String` and returns it. If reading or
     /// conversion fails, returns `None`.
     pub async fn into_string(self) -> Option<String> {
-        self.into_bytes().await.and_then(|bytes| match String::from_utf8(bytes) {
-            Ok(string) => Some(string),
-            Err(e) => {
-                error_!("Body is invalid UTF-8: {}", e);
-                None
-            }
-        })
+        self.into_bytes()
+            .await
+            .and_then(|bytes| match String::from_utf8(bytes) {
+                Ok(string) => Some(string),
+                Err(e) => {
+                    error_!("Body is invalid UTF-8: {}", e);
+                    None
+                }
+            })
     }
 }
 
@@ -212,9 +220,7 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn new(base: Response<'r>) -> ResponseBuilder<'r> {
-        ResponseBuilder {
-            response: base,
-        }
+        ResponseBuilder { response: base }
     }
 
     /// Sets the status of the `Response` being built to `status`.
@@ -280,7 +286,8 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn header<'h: 'r, H>(&mut self, header: H) -> &mut ResponseBuilder<'r>
-        where H: Into<Header<'h>>
+    where
+        H: Into<Header<'h>>,
     {
         self.response.set_header(header);
         self
@@ -311,7 +318,8 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn header_adjoin<'h: 'r, H>(&mut self, header: H) -> &mut ResponseBuilder<'r>
-        where H: Into<Header<'h>>
+    where
+        H: Into<Header<'h>>,
     {
         self.response.adjoin_header(header);
         self
@@ -336,7 +344,11 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn raw_header<'a, 'b, N, V>(&mut self, name: N, value: V) -> &mut ResponseBuilder<'r>
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>, 'a: 'r, 'b: 'r
+    where
+        N: Into<Cow<'a, str>>,
+        V: Into<Cow<'b, str>>,
+        'a: 'r,
+        'b: 'r,
     {
         self.response.set_raw_header(name, value);
         self
@@ -362,7 +374,11 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn raw_header_adjoin<'a, 'b, N, V>(&mut self, name: N, value: V) -> &mut ResponseBuilder<'r>
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>, 'a: 'r, 'b: 'r
+    where
+        N: Into<Cow<'a, str>>,
+        V: Into<Cow<'b, str>>,
+        'a: 'r,
+        'b: 'r,
     {
         self.response.adjoin_raw_header(name, value);
         self
@@ -385,8 +401,9 @@ impl<'r> ResponseBuilder<'r> {
     ///     .finalize();
     /// ```
     pub fn sized_body<B, S>(&mut self, size: S, body: B) -> &mut ResponseBuilder<'r>
-        where B: AsyncRead + AsyncSeek + Send + Unpin + 'r,
-              S: Into<Option<usize>>
+    where
+        B: AsyncRead + AsyncSeek + Send + Unpin + 'r,
+        S: Into<Option<usize>>,
     {
         self.response.set_sized_body(size, body);
         self
@@ -406,7 +423,8 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn streamed_body<B>(&mut self, body: B) -> &mut ResponseBuilder<'r>
-        where B: AsyncRead + Send + 'r
+    where
+        B: AsyncRead + Send + 'r,
     {
         self.response.set_streamed_body(body);
         self
@@ -431,7 +449,8 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn chunked_body<B>(&mut self, body: B, chunk_size: usize) -> &mut ResponseBuilder<'r>
-        where B: AsyncRead + Send + 'r
+    where
+        B: AsyncRead + Send + 'r,
     {
         self.response.set_chunked_body(body, chunk_size);
         self
@@ -455,8 +474,9 @@ impl<'r> ResponseBuilder<'r> {
     /// ```
     #[inline(always)]
     pub fn raw_body<S, C>(&mut self, body: Body<S, C>) -> &mut ResponseBuilder<'r>
-        where S: AsyncRead + AsyncSeek + Send + Unpin + 'r,
-              C: AsyncRead + Send + Unpin + 'r
+    where
+        S: AsyncRead + AsyncSeek + Send + Unpin + 'r,
+        C: AsyncRead + Send + Unpin + 'r,
     {
         self.response.set_raw_body(body);
         self
@@ -584,13 +604,11 @@ impl<'r> ResponseBuilder<'r> {
     }
 }
 
-pub trait AsyncReadSeek: AsyncRead + AsyncSeek { }
-impl<T: AsyncRead + AsyncSeek> AsyncReadSeek for T {  }
+pub trait AsyncReadSeek: AsyncRead + AsyncSeek {}
+impl<T: AsyncRead + AsyncSeek> AsyncReadSeek for T {}
 
-pub type ResponseBody<'r> = Body<
-    Pin<Box<dyn AsyncReadSeek + Send + 'r>>,
-    Pin<Box<dyn AsyncRead + Send + 'r>>
->;
+pub type ResponseBody<'r> =
+    Body<Pin<Box<dyn AsyncReadSeek + Send + 'r>>, Pin<Box<dyn AsyncRead + Send + 'r>>>;
 
 /// A response, as returned by types implementing [`Responder`].
 #[derive(Default)]
@@ -709,7 +727,9 @@ impl<'r> Response<'r> {
     /// ```
     #[inline(always)]
     pub fn content_type(&self) -> Option<ContentType> {
-        self.headers().get_one("Content-Type").and_then(|v| v.parse().ok())
+        self.headers()
+            .get_one("Content-Type")
+            .and_then(|v| v.parse().ok())
     }
 
     /// Sets the status of `self` to a custom `status` with status code `code`
@@ -823,7 +843,9 @@ impl<'r> Response<'r> {
     /// ```
     #[inline(always)]
     pub fn set_raw_header<'a: 'r, 'b: 'r, N, V>(&mut self, name: N, value: V) -> bool
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    where
+        N: Into<Cow<'a, str>>,
+        V: Into<Cow<'b, str>>,
     {
         self.set_header(Header::new(name, value))
     }
@@ -880,7 +902,9 @@ impl<'r> Response<'r> {
     /// ```
     #[inline(always)]
     pub fn adjoin_raw_header<'a: 'r, 'b: 'r, N, V>(&mut self, name: N, value: V)
-        where N: Into<Cow<'a, str>>, V: Into<Cow<'b, str>>
+    where
+        N: Into<Cow<'a, str>>,
+        V: Into<Cow<'b, str>>,
     {
         self.adjoin_header(Header::new(name, value));
     }
@@ -1047,7 +1071,7 @@ impl<'r> Response<'r> {
         if let Some(body) = self.take_body() {
             self.body = match body {
                 Body::Sized(_, n) => Some(Body::Sized(Box::pin(io::Cursor::new(&[])), n)),
-                Body::Chunked(..) => None
+                Body::Chunked(..) => None,
             };
         }
     }
@@ -1072,8 +1096,9 @@ impl<'r> Response<'r> {
     /// # })
     /// ```
     pub fn set_sized_body<B, S>(&mut self, size: S, body: B)
-        where B: AsyncRead + AsyncSeek + Send + Unpin + 'r,
-              S: Into<Option<usize>>
+    where
+        B: AsyncRead + AsyncSeek + Send + Unpin + 'r,
+        S: Into<Option<usize>>,
     {
         self.body = Some(Body::Sized(Box::pin(body), size.into()));
     }
@@ -1090,13 +1115,16 @@ impl<'r> Response<'r> {
     /// use rocket::Response;
     ///
     /// # rocket::async_test(async {
-    /// let mut response = Response::new();
-    /// response.set_streamed_body(repeat(97).take(5));
-    /// assert_eq!(response.body_string().await.unwrap(), "aaaaa");
+    ///     let mut response = Response::new();
+    ///     response.set_streamed_body(repeat(97).take(5));
+    ///     assert_eq!(response.body_string().await.unwrap(), "aaaaa");
     /// # })
     /// ```
     #[inline(always)]
-    pub fn set_streamed_body<B>(&mut self, body: B) where B: AsyncRead + Send + 'r {
+    pub fn set_streamed_body<B>(&mut self, body: B)
+    where
+        B: AsyncRead + Send + 'r,
+    {
         self.set_chunked_body(body, DEFAULT_CHUNK_SIZE);
     }
 
@@ -1117,7 +1145,8 @@ impl<'r> Response<'r> {
     /// ```
     #[inline(always)]
     pub fn set_chunked_body<B>(&mut self, body: B, chunk_size: usize)
-            where B: AsyncRead + Send + 'r
+    where
+        B: AsyncRead + Send + 'r,
     {
         self.body = Some(Body::Chunked(Box::pin(body), chunk_size));
     }
@@ -1144,8 +1173,9 @@ impl<'r> Response<'r> {
     /// ```
     #[inline(always)]
     pub fn set_raw_body<S, C>(&mut self, body: Body<S, C>)
-        where S: AsyncRead + AsyncSeek + Send + Unpin + 'r,
-              C: AsyncRead + Send + Unpin + 'r
+    where
+        S: AsyncRead + AsyncSeek + Send + Unpin + 'r,
+        C: AsyncRead + Send + Unpin + 'r,
     {
         self.body = Some(match body {
             Body::Sized(a, n) => Body::Sized(Box::pin(a), n),
@@ -1254,7 +1284,7 @@ impl fmt::Debug for Response<'_> {
 
         match self.body {
             Some(ref body) => body.fmt(f),
-            None => writeln!(f, "Empty Body")
+            None => writeln!(f, "Empty Body"),
         }
     }
 }

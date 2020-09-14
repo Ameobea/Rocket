@@ -41,6 +41,7 @@ impl<'r, 'o: 'r, R: Responder<'r, 'o>> Responder<'r, 'o> for Compress<R> {
             .merge(self.0.respond_to(request)?)
             .finalize();
 
+        println!("YOU SUCK");
         CompressionUtils::compress_response(request, &mut response, &[]);
         Ok(response)
     }
